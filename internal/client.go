@@ -1454,6 +1454,7 @@ func newClient(ctx context.Context, options ClientOptions, existing Client) (Cli
 		options.MetricsHandler = metrics.NopHandler
 	}
 	options.MetricsHandler = options.MetricsHandler.WithTags(metrics.RootTags(options.Namespace))
+	options.MetricsHandler = metrics.NewDexMetricsHandler(options.MetricsHandler)
 
 	if options.HostPort == "" {
 		options.HostPort = LocalHostPort
@@ -1700,6 +1701,7 @@ func NewNamespaceClient(options ClientOptions) (NamespaceClient, error) {
 		options.MetricsHandler = metrics.NopHandler
 	}
 	options.MetricsHandler = options.MetricsHandler.WithTags(metrics.RootTags(metrics.NoneTagValue))
+	options.MetricsHandler = metrics.NewDexMetricsHandler(options.MetricsHandler)
 
 	if options.HostPort == "" {
 		options.HostPort = LocalHostPort

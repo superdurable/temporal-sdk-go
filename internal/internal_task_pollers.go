@@ -457,6 +457,13 @@ func (wtp *workflowTaskProcessor) processWorkflowTask(task *workflowTask) (retEr
 		})
 		return nil
 	}
+	polledTask := task.task
+	workflowTaskMetricsHandler := wtp.metricsHandler.WithTags(metrics.WorkflowTags(polledTask.WorkflowType.GetName()))
+	defer func() {
+		workflowTaskMetricsHandler.Counter(metrics.WorkflowTaskQueuePollSucceedCounter).Inc(1)
+		scheduleToStartLatency := polledTask.GetStartedTime().AsTime().Sub(polledTask.GetScheduledTime().AsTime())
+		workflowTaskMetricsHandler.Timer(metrics.WorkflowTaskScheduleToStartLatency).Record(scheduleToStartLatency)
+	}()
 
 	doneCh := make(chan struct{})
 	laResultCh := make(chan *localActivityResult)
@@ -512,7 +519,8 @@ func (wtp *workflowTaskProcessor) processWorkflowTask(task *workflowTask) (retEr
 					task.task,
 					startTime,
 					downloadPayloadMetrics,
-					wfctx.workflowInfo)
+					wfctx.workflowInfo,
+					wtp.dexWorkflowTaskMetricsHandler(task.task, wfctx))
 				if err != nil {
 					return nil, err
 				}
@@ -530,6 +538,7 @@ func (wtp *workflowTaskProcessor) processWorkflowTask(task *workflowTask) (retEr
 				return task, nil
 			},
 		)
+		workflowTaskMetricsHandler = wtp.dexWorkflowTaskMetricsHandler(task.task, wfctx)
 		if taskCompletion == nil && taskErr == nil {
 			return nil
 		}
@@ -542,7 +551,8 @@ func (wtp *workflowTaskProcessor) processWorkflowTask(task *workflowTask) (retEr
 			task.task,
 			startTime,
 			downloadPayloadMetrics,
-			wfctx.workflowInfo)
+			wfctx.workflowInfo,
+			workflowTaskMetricsHandler)
 		if err != nil {
 			// If we get an error responding to the workflow task we need to evict the execution from the cache.
 			taskErr = err
@@ -573,8 +583,12 @@ func (wtp *workflowTaskProcessor) RespondTaskCompletedWithMetrics(
 	startTime time.Time,
 	downloadPayloadMetrics *workflowTaskStorageMetrics,
 	workflowInfo *WorkflowInfo,
+	resolvedMetricsHandler metrics.Handler,
 ) (response *workflowservice.RespondWorkflowTaskCompletedResponse, err error) {
-	metricsHandler := wtp.metricsHandler.WithTags(metrics.WorkflowTags(task.WorkflowType.GetName()))
+	metricsHandler := resolvedMetricsHandler
+	if metricsHandler == nil {
+		metricsHandler = wtp.metricsHandler.WithTags(metrics.WorkflowTags(task.WorkflowType.GetName()))
+	}
 
 	emitFailMetric := false
 	var failureReason string
@@ -693,6 +707,17 @@ func (wtp *workflowTaskProcessor) RespondTaskCompletedWithMetrics(
 	}
 
 	return
+}
+
+func (wtp *workflowTaskProcessor) dexWorkflowTaskMetricsHandler(
+	task *workflowservice.PollWorkflowTaskQueueResponse,
+	workflowContext *workflowExecutionContextImpl,
+) metrics.Handler {
+	handler := wtp.metricsHandler.WithTags(metrics.WorkflowTags(task.WorkflowType.GetName()))
+	if eventHandler := workflowContext.getEventHandler(); eventHandler != nil && eventHandler.dexFlowTypeConfigured {
+		handler = handler.WithTags(metrics.DexWorkflowTags(eventHandler.dexFlowType))
+	}
+	return handler
 }
 
 func (wtp *workflowTaskProcessor) sendTaskCompletedRequest(
@@ -964,13 +989,27 @@ func (latp *localActivityTaskPoller) ProcessTask(task interface{}) error {
 }
 
 func (lath *localActivityTaskHandler) executeLocalActivityTask(task *localActivityTask) (result *localActivityResult) {
+	inheritedDexFlowType := popDexFlowTypeHeader(task.header)
 	workflowType := task.params.WorkflowInfo.WorkflowType.Name
 	activityType := task.params.ActivityType
 	metricsHandler := lath.metricsHandler.WithTags(metrics.LocalActivityTags(workflowType, activityType))
+	initialValues := dexActivityMetricValues{
+		flowType:    metrics.NoneTagValue,
+		stepType:    metrics.NoneTagValue,
+		subFlowType: metrics.NoneTagValue,
+		rpcName:     metrics.NoneTagValue,
+		kind:        task.params.DexMetricsProviders.metricKind(),
+	}
+	if inheritedDexFlowType != "" {
+		initialValues.flowType = inheritedDexFlowType
+	}
+	metricsHandler = dexActivityMetricsHandler(metricsHandler, initialValues)
 
-	metricsHandler.Counter(metrics.LocalActivityTotalCounter).Inc(1)
-
-	ae := activityExecutor{name: activityType, fn: task.params.ActivityFn}
+	ae := activityExecutor{
+		name:                activityType,
+		fn:                  task.params.ActivityFn,
+		dexMetricsProviders: task.params.DexMetricsProviders,
+	}
 	traceLog(func() {
 		lath.logger.Debug("Processing new local activity task",
 			tagWorkflowID, task.params.WorkflowInfo.WorkflowExecution.ID,
@@ -979,17 +1018,23 @@ func (lath *localActivityTaskHandler) executeLocalActivityTask(task *localActivi
 			tagAttempt, task.attempt,
 		)
 	})
-	ctx, err := WithLocalActivityTask(lath.backgroundContext, task, lath.logger, lath.metricsHandler,
+	ctx, err := WithLocalActivityTask(lath.backgroundContext, task, lath.logger, metricsHandler,
 		lath.dataConverter, lath.interceptors, lath.client, lath.workerStopChannel)
 	if err != nil {
 		return &localActivityResult{task: task, err: fmt.Errorf("failed building context: %w", err)}
 	}
+	getActivityEnv(ctx).dexInheritedFlowType = inheritedDexFlowType
 
 	// propagate context information into the local activity context from the headers
 	ctx, err = contextWithHeaderPropagated(ctx, task.header, lath.contextPropagators)
 	if err != nil {
 		return &localActivityResult{task: task, err: err}
 	}
+	if err = ae.applyDexMetrics(ctx, task.params.InputArgs); err != nil {
+		return &localActivityResult{task: task, err: err}
+	}
+	metricsHandler = getActivityEnv(ctx).metricsHandler
+	metricsHandler.Counter(metrics.LocalActivityTotalCounter).Inc(1)
 
 	info := getActivityEnv(ctx)
 	ctx, cancel := context.WithDeadline(ctx, info.deadline)
@@ -1224,11 +1269,6 @@ func (wtp *workflowTaskPoller) poll(ctx context.Context) (taskForWorker, error) 
 			"IsQueryTask", response.Query != nil)
 	})
 
-	metricsHandler := wtp.metricsHandler.WithTags(metrics.WorkflowTags(response.WorkflowType.GetName()))
-	metricsHandler.Counter(metrics.WorkflowTaskQueuePollSucceedCounter).Inc(1)
-
-	scheduleToStartLatency := response.GetStartedTime().AsTime().Sub(response.GetScheduledTime().AsTime())
-	metricsHandler.Timer(metrics.WorkflowTaskScheduleToStartLatency).Record(scheduleToStartLatency)
 	return task, nil
 }
 
@@ -1433,13 +1473,6 @@ func (atp *activityTaskPoller) poll(ctx context.Context) (taskForWorker, error) 
 
 	atp.pollTimeTracker.recordPollSuccess(metrics.PollerTypeActivityTask)
 
-	workflowType := response.WorkflowType.GetName()
-	activityType := response.ActivityType.GetName()
-	metricsHandler := atp.metricsHandler.WithTags(metrics.ActivityTags(workflowType, activityType, atp.taskQueueName))
-
-	scheduleToStartLatency := response.GetStartedTime().AsTime().Sub(response.GetCurrentAttemptScheduledTime().AsTime())
-	metricsHandler.Timer(metrics.ActivityScheduleToStartLatency).Record(scheduleToStartLatency)
-
 	return &activityTask{task: response}, nil
 }
 
@@ -1476,7 +1509,13 @@ func (atp *activityTaskPoller) ProcessTask(task interface{}) error {
 
 	// Process the activity task.
 	request, err := atp.taskHandler.Execute(atp.taskQueueName, activityTask.task)
-
+	if provider, ok := atp.taskHandler.(interface {
+		takeDexMetricsHandler([]byte) (metrics.Handler, bool)
+	}); ok {
+		if resolvedHandler, resolved := provider.takeDexMetricsHandler(activityTask.task.TaskToken); resolved {
+			activityMetricsHandler = resolvedHandler
+		}
+	}
 	// err is returned in case of internal failure, such as unable to propagate context or context timeout.
 	if err != nil {
 		activityMetricsHandler.Counter(metrics.ActivityExecutionFailedCounter).Inc(1)

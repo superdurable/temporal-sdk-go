@@ -154,6 +154,8 @@ type (
 		enableLoggingInReplay bool // flag to indicate if workflow should enable logging in replay mode
 
 		metricsHandler           metrics.Handler
+		dexFlowType              string
+		dexFlowTypeConfigured    bool
 		registry                 *registry
 		dataConverter            converter.DataConverter
 		failureConverter         converter.FailureConverter
@@ -736,6 +738,18 @@ func (wc *workflowEnvironmentImpl) GetLogger() log.Logger {
 
 func (wc *workflowEnvironmentImpl) GetMetricsHandler() metrics.Handler {
 	return wc.metricsHandler
+}
+
+func (wc *workflowEnvironmentImpl) setDexWorkflowMetrics(flowType string, configured bool) {
+	wc.dexFlowType = flowType
+	wc.dexFlowTypeConfigured = configured
+	if configured {
+		wc.metricsHandler = wc.metricsHandler.WithTags(metrics.DexWorkflowTags(flowType))
+	}
+}
+
+func (wc *workflowEnvironmentImpl) dexWorkflowFlowType() (string, bool) {
+	return wc.dexFlowType, wc.dexFlowTypeConfigured
 }
 
 func (wc *workflowEnvironmentImpl) GetDataConverter() converter.DataConverter {

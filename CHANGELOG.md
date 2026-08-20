@@ -20,6 +20,17 @@ to docs, or any other relevant information.
 
 ## [Unreleased]
 
+### Added
+
+- Added Dex metric tag providers to workflow and activity registration options. The fork propagates
+  workflow flow types to activities, adds flow/step/subflow/RPC metric tags, and rewrites Temporal
+  SDK metric names into the `dex_*` namespace.
+
+### Breaking Changes
+
+- SDK metrics beginning with `temporal_` are now emitted under their corresponding `dex_*` names.
+  Dashboards and alerts must migrate to the new metric names and Dex tag keys.
+- Increased the fork's minimum required Go version to 1.26.
 
 ## [1.46.0] - 2026-07-28
 

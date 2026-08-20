@@ -693,6 +693,7 @@ type registry struct {
 	workflowFuncMap               map[string]interface{}
 	workflowAliasMap              map[string]string
 	workflowVersioningBehaviorMap map[string]VersioningBehavior
+	workflowFlowTypeProviderMap   map[string]func(any) string
 	activityFuncMap               map[string]activity
 	activityAliasMap              map[string]string
 	dynamicWorkflow               interface{}
@@ -717,6 +718,9 @@ func (r *registry) RegisterWorkflowWithOptions(
 	// Support direct registration of WorkflowDefinition
 	factory, ok := wf.(WorkflowDefinitionFactory)
 	if ok {
+		if options.FlowTypeProvider != nil {
+			panic("workflow metrics providers are not supported for WorkflowDefinitionFactory registration")
+		}
 		if len(options.Name) == 0 {
 			panic("WorkflowDefinitionFactory must be registered with a name")
 		}
@@ -733,6 +737,9 @@ func (r *registry) RegisterWorkflowWithOptions(
 	fnType := reflect.TypeOf(wf)
 	if err := validateFnFormat(fnType, true, false); err != nil {
 		panic(err)
+	}
+	if options.FlowTypeProvider != nil {
+		validateDexProviderInput(fnType, true)
 	}
 	fnName, _ := getFunctionName(wf)
 	alias := options.Name
@@ -755,6 +762,7 @@ func (r *registry) RegisterWorkflowWithOptions(
 	}
 	r.workflowFuncMap[registerName] = wf
 	r.workflowVersioningBehaviorMap[registerName] = options.VersioningBehavior
+	r.workflowFlowTypeProviderMap[registerName] = options.FlowTypeProvider
 
 	if len(alias) > 0 && r.workflowAliasMap != nil {
 		r.workflowAliasMap[fnName] = alias
@@ -792,9 +800,13 @@ func (r *registry) RegisterActivityWithOptions(
 	af interface{},
 	options RegisterActivityOptions,
 ) {
+	providers := dexActivityProviders(options)
 	// Support direct registration of activity
 	a, ok := af.(activity)
 	if ok {
+		if providers.configured() {
+			panic("activity metrics providers are not supported for custom activity executor registration")
+		}
 		if options.Name == "" {
 			panic("registration of activity interface requires name")
 		}
@@ -807,6 +819,9 @@ func (r *registry) RegisterActivityWithOptions(
 	// Validate that it is a function
 	fnType := reflect.TypeOf(af)
 	if fnType.Kind() == reflect.Ptr && fnType.Elem().Kind() == reflect.Struct {
+		if providers.configured() {
+			panic("activity metrics providers are not supported for activity struct registration")
+		}
 		registerErr := r.registerActivityStructWithOptions(af, options)
 		if registerErr != nil {
 			panic(registerErr)
@@ -815,6 +830,9 @@ func (r *registry) RegisterActivityWithOptions(
 	}
 	if err := validateFnFormat(fnType, false, false); err != nil {
 		panic(err)
+	}
+	if providers.configured() {
+		validateDexProviderInput(fnType, false)
 	}
 	fnName, _ := getFunctionName(af)
 	alias := options.Name
@@ -835,7 +853,7 @@ func (r *registry) RegisterActivityWithOptions(
 			panic(fmt.Sprintf("activity type \"%v\" is already registered", registerName))
 		}
 	}
-	r.activityFuncMap[registerName] = &activityExecutor{name: registerName, fn: af}
+	r.activityFuncMap[registerName] = &activityExecutor{name: registerName, fn: af, dexMetricsProviders: providers}
 	if len(alias) > 0 && r.activityAliasMap != nil {
 		r.activityAliasMap[fnName] = alias
 	}
@@ -967,6 +985,17 @@ func (r *registry) GetActivity(fnName string) (activity, bool) {
 	return nil, false
 }
 
+func (r *registry) getDexActivityMetricsProviders(fnName string) dexActivityMetricProviders {
+	activity, ok := r.GetActivity(fnName)
+	if !ok {
+		return dexActivityMetricProviders{kind: dexActivityMetricKindSystem}
+	}
+	if executor, ok := activity.(*activityExecutor); ok {
+		return executor.dexMetricsProviders
+	}
+	return dexActivityMetricProviders{kind: dexActivityMetricKindSystem}
+}
+
 func (r *registry) getActivityNoLock(fnName string) (activity, bool) {
 	a, ok := r.activityFuncMap[fnName]
 	return a, ok
@@ -1025,8 +1054,20 @@ func (r *registry) getWorkflowDefinition(wt WorkflowType) (WorkflowDefinition, e
 	if wdf, ok := wf.(WorkflowDefinitionFactory); ok {
 		return wdf.NewWorkflowDefinition(), nil
 	}
-	executor := &workflowExecutor{workflowType: lookup, fn: wf, interceptors: r.interceptors, dynamic: dynamic}
+	executor := &workflowExecutor{
+		workflowType:     lookup,
+		fn:               wf,
+		interceptors:     r.interceptors,
+		dynamic:          dynamic,
+		flowTypeProvider: r.getWorkflowFlowTypeProvider(lookup),
+	}
 	return newSyncWorkflowDefinition(executor), nil
+}
+
+func (r *registry) getWorkflowFlowTypeProvider(name string) func(any) string {
+	r.Lock()
+	defer r.Unlock()
+	return r.workflowFlowTypeProviderMap[name]
 }
 
 func (r *registry) getWorkflowVersioningBehavior(wt WorkflowType) (VersioningBehavior, bool) {
@@ -1129,6 +1170,7 @@ func newRegistryWithOptions(options registryOptions) *registry {
 	r := &registry{
 		workflowFuncMap:               make(map[string]interface{}),
 		workflowVersioningBehaviorMap: make(map[string]VersioningBehavior),
+		workflowFlowTypeProviderMap:   make(map[string]func(any) string),
 		activityFuncMap:               make(map[string]activity),
 		nexusServices:                 make(map[string]*nexus.Service),
 	}
@@ -1141,10 +1183,11 @@ func newRegistryWithOptions(options registryOptions) *registry {
 
 // Wrapper to execute workflow functions.
 type workflowExecutor struct {
-	workflowType string
-	fn           interface{}
-	interceptors []WorkerInterceptor
-	dynamic      bool
+	workflowType     string
+	fn               interface{}
+	interceptors     []WorkerInterceptor
+	dynamic          bool
+	flowTypeProvider func(any) string
 }
 
 func (we *workflowExecutor) Execute(ctx Context, input *commonpb.Payloads) (*commonpb.Payloads, error) {
@@ -1165,6 +1208,21 @@ func (we *workflowExecutor) Execute(ctx Context, input *commonpb.Payloads) (*com
 		}
 	}
 
+	if we.flowTypeProvider != nil {
+		env, ok := getWorkflowEnvironment(ctx).(dexWorkflowMetricsEnvironment)
+		if !ok {
+			panic(fmt.Errorf("workflow %q does not support Dex workflow metrics", we.workflowType))
+		}
+		env.setDexWorkflowMetrics(metrics.NoneTagValue, true)
+		flowType, providerErr := invokeDexMetricsProvider(
+			"workflow", we.workflowType, "FlowTypeProvider", we.flowTypeProvider, args[0],
+		)
+		if providerErr != nil {
+			panic(providerErr)
+		}
+		env.setDexWorkflowMetrics(flowType, true)
+	}
+
 	envInterceptor := getWorkflowEnvironmentInterceptor(ctx)
 	envInterceptor.fn = we.fn
 
@@ -1179,10 +1237,11 @@ func (we *workflowExecutor) Execute(ctx Context, input *commonpb.Payloads) (*com
 
 // Wrapper to execute activity functions.
 type activityExecutor struct {
-	name             string
-	fn               interface{}
-	skipInterceptors bool
-	dynamic          bool
+	name                string
+	fn                  interface{}
+	skipInterceptors    bool
+	dynamic             bool
+	dexMetricsProviders dexActivityMetricProviders
 }
 
 func (ae *activityExecutor) ActivityType() ActivityType {
@@ -1194,6 +1253,14 @@ func (ae *activityExecutor) GetFunction() interface{} {
 }
 
 func (ae *activityExecutor) Execute(ctx context.Context, input *commonpb.Payloads) (*commonpb.Payloads, error) {
+	args, err := ae.prepareDexMetrics(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return ae.ExecuteWithActualArgs(ctx, args)
+}
+
+func (ae *activityExecutor) prepareDexMetrics(ctx context.Context, input *commonpb.Payloads) ([]interface{}, error) {
 	fnType := reflect.TypeOf(ae.fn)
 	dataConverter := getDataConverterFromActivityCtx(ctx)
 
@@ -1210,8 +1277,37 @@ func (ae *activityExecutor) Execute(ctx context.Context, input *commonpb.Payload
 				err, ae.name)
 		}
 	}
+	if err := ae.applyDexMetrics(ctx, args); err != nil {
+		return nil, err
+	}
+	return args, nil
+}
 
-	return ae.ExecuteWithActualArgs(ctx, args)
+func (ae *activityExecutor) applyDexMetrics(ctx context.Context, args []interface{}) error {
+	env := getActivityEnv(ctx)
+	if env == nil {
+		return nil
+	}
+	values := dexActivityMetricValues{
+		flowType:    metrics.NoneTagValue,
+		stepType:    metrics.NoneTagValue,
+		subFlowType: metrics.NoneTagValue,
+		rpcName:     metrics.NoneTagValue,
+		kind:        ae.dexMetricsProviders.metricKind(),
+	}
+	if env.dexInheritedFlowType != "" {
+		values.flowType = env.dexInheritedFlowType
+	}
+	env.setDexActivityMetrics(values)
+	if !ae.dexMetricsProviders.configured() {
+		return nil
+	}
+	resolved, err := ae.dexMetricsProviders.values(ae.name, args[0], env.dexInheritedFlowType)
+	if err != nil {
+		return err
+	}
+	env.setDexActivityMetrics(resolved)
+	return nil
 }
 
 func (ae *activityExecutor) ExecuteWithActualArgs(ctx context.Context, args []interface{}) (*commonpb.Payloads, error) {

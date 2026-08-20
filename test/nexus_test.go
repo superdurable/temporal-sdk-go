@@ -156,13 +156,13 @@ func (tc *testContext) newNexusClient(t *testing.T, service string) *nexusclient
 
 func (tc *testContext) requireTaskQueueTimer(t *assert.CollectT, metric string) {
 	assert.True(t, slices.ContainsFunc(tc.metricsHandler.Timers(), func(ct *metrics.CapturedTimer) bool {
-		return ct.Name == metric && ct.Tags[metrics.TaskQueueTagName] == tc.taskQueue
+		return ct.Name == dexNexusMetricName(metric) && ct.Tags[metrics.TaskQueueTagName] == tc.taskQueue
 	}))
 }
 
 func (tc *testContext) requireTimer(t *assert.CollectT, metric, service, operation string) {
 	assert.True(t, slices.ContainsFunc(tc.metricsHandler.Timers(), func(ct *metrics.CapturedTimer) bool {
-		return ct.Name == metric &&
+		return ct.Name == dexNexusMetricName(metric) &&
 			ct.Tags[metrics.TaskQueueTagName] == tc.taskQueue &&
 			ct.Tags[metrics.NexusServiceTagName] == service &&
 			ct.Tags[metrics.NexusOperationTagName] == operation
@@ -171,11 +171,18 @@ func (tc *testContext) requireTimer(t *assert.CollectT, metric, service, operati
 
 func (tc *testContext) requireFailureCounter(t *assert.CollectT, service, operation, failureType string) {
 	assert.True(t, slices.ContainsFunc(tc.metricsHandler.Counters(), func(ct *metrics.CapturedCounter) bool {
-		return ct.Name == metrics.NexusTaskExecutionFailedCounter &&
+		return ct.Name == dexNexusMetricName(metrics.NexusTaskExecutionFailedCounter) &&
 			ct.Tags[metrics.NexusServiceTagName] == service &&
 			ct.Tags[metrics.NexusOperationTagName] == operation &&
 			ct.Tags[metrics.FailureReasonTagName] == failureType
 	}))
+}
+
+func dexNexusMetricName(name string) string {
+	if suffix, ok := strings.CutPrefix(name, metrics.TemporalMetricsPrefix); ok {
+		return "dex_" + suffix
+	}
+	return name
 }
 
 func (tc *testContext) requireLogTags(t *assert.CollectT, message, service, operation string) {

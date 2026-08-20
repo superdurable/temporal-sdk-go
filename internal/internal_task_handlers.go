@@ -180,6 +180,7 @@ type (
 		outboundPayloadVisitor           PayloadVisitor
 		payloadVisitorConcurrency        int
 		activityCancellationCallbacks    *activityCancellationCallbacks
+		dexMetricsHandlers               sync.Map
 	}
 
 	// history wrapper method to help information about events.
@@ -1084,10 +1085,8 @@ func (w *workflowExecutionContextImpl) ProcessWorkflowTask(workflowTask *workflo
 
 	curReplayCmdsIndex := -1
 
-	metricsHandler := w.wth.metricsHandler.WithTags(metrics.WorkflowTags(task.WorkflowType.GetName()))
 	start := time.Now()
-	// This is set to nil once recorded
-	metricsTimer := metricsHandler.Timer(metrics.WorkflowTaskReplayLatency)
+	workflowReplayMetricsRecorded := false
 
 	eventHandler.ResetLAWFTAttemptCounts()
 	eventHandler.sdkFlags.markSDKFlagsSent()
@@ -1188,9 +1187,11 @@ ProcessEvents:
 
 		for i, event := range reorderedEvents {
 			isInReplay := reorderedHistory.IsReplayEvent(event)
-			if !isInReplay && metricsTimer != nil {
-				metricsTimer.Record(time.Since(start))
-				metricsTimer = nil
+			if !isInReplay && !workflowReplayMetricsRecorded {
+				eventHandler.workflowEnvironmentImpl.GetMetricsHandler().
+					Timer(metrics.WorkflowTaskReplayLatency).
+					Record(time.Since(start))
+				workflowReplayMetricsRecorded = true
 			}
 
 			isLast := !isInReplay && i == len(reorderedEvents)-1
@@ -1270,9 +1271,10 @@ ProcessEvents:
 		replayCommands = replayCommands[:curReplayCmdsIndex]
 	}
 
-	if metricsTimer != nil {
-		metricsTimer.Record(time.Since(start))
-		metricsTimer = nil
+	if !workflowReplayMetricsRecorded {
+		eventHandler.workflowEnvironmentImpl.GetMetricsHandler().
+			Timer(metrics.WorkflowTaskReplayLatency).
+			Record(time.Since(start))
 	}
 
 	// Non-deterministic error could happen in 2 different places:
@@ -2034,8 +2036,7 @@ func (wth *workflowTaskHandlerImpl) completeWorkflow(
 	}
 
 	// Return request and a function that will update certain metrics
-	metricsHandler := wth.metricsHandler.WithTags(metrics.WorkflowTags(
-		eventHandler.workflowEnvironmentImpl.workflowInfo.WorkflowType.Name))
+	metricsHandler := eventHandler.workflowEnvironmentImpl.GetMetricsHandler()
 	return workflowTaskCompletion{
 		rawRequest: builtRequest,
 		applyCompletionMetrics: func() {
@@ -2357,6 +2358,7 @@ func newServiceInvoker(
 
 // Execute executes an implementation of the activity.
 func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice.PollActivityTaskQueueResponse) (result interface{}, err error) {
+	inheritedDexFlowType := popDexFlowTypeHeader(t.Header)
 	traceLog(func() {
 		if t.WorkflowExecution.GetWorkflowId() == "" {
 			ath.logger.Debug("Processing new standalone activity task",
@@ -2409,11 +2411,15 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 	workflowType := t.WorkflowType.GetName()
 	activityType := t.ActivityType.GetName()
 	metricsHandler := ath.metricsHandler.WithTags(metrics.ActivityTags(workflowType, activityType, ath.taskQueueName))
+	defer func() {
+		ath.dexMetricsHandlers.Store(string(t.TaskToken), metricsHandler)
+	}()
 	ctx, err := WithActivityTask(canCtx, t, taskQueue, invoker, ath.logger, metricsHandler,
 		ath.dataConverter, ath.workerStopCh, ath.contextPropagators, ath.registry.interceptors, ath.client)
 	if err != nil {
 		return nil, err
 	}
+	getActivityEnv(ctx).dexInheritedFlowType = inheritedDexFlowType
 
 	// We must capture the context here because it is changed later to one that is
 	// cancelled when the activity is done
@@ -2431,10 +2437,26 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 			NewActivityNotRegisteredError(activityType, ath.getRegisteredActivityNames()),
 			dataConverter, failureConverter, ath.namespace, false, ath.versionStamp, ath.deployment, ath.workerDeploymentOptions), nil
 	}
+	initialValues := dexActivityMetricValues{
+		flowType:    metrics.NoneTagValue,
+		stepType:    metrics.NoneTagValue,
+		subFlowType: metrics.NoneTagValue,
+		rpcName:     metrics.NoneTagValue,
+		kind:        dexActivityMetricKindSystem,
+	}
+	if inheritedDexFlowType != "" {
+		initialValues.flowType = inheritedDexFlowType
+	}
+	if executor, ok := activityImplementation.(*activityExecutor); ok {
+		initialValues.kind = executor.dexMetricsProviders.metricKind()
+	}
+	getActivityEnv(ctx).setDexActivityMetrics(initialValues)
+	metricsHandler = getActivityEnv(ctx).metricsHandler
 
 	// panic handler
 	defer func() {
 		if p := recover(); p != nil {
+			metricsHandler = getActivityEnv(ctx).metricsHandler
 			topLine := fmt.Sprintf("activity for %s [panic]:", ath.taskQueueName)
 			st := getStackTraceRaw(topLine, 7, 0)
 			ath.logger.Error("Activity panic.",
@@ -2461,7 +2483,23 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 	ctx, dlCancelFunc := context.WithDeadline(ctx, info.deadline)
 	defer dlCancelFunc()
 
-	output, err := activityImplementation.Execute(ctx, t.Input)
+	var output *commonpb.Payloads
+	if executor, ok := activityImplementation.(*activityExecutor); ok {
+		var args []interface{}
+		args, err = executor.prepareDexMetrics(ctx, t.Input)
+		metricsHandler = getActivityEnv(ctx).metricsHandler
+		scheduleToStartLatency := t.GetStartedTime().AsTime().Sub(t.GetCurrentAttemptScheduledTime().AsTime())
+		metricsHandler.Timer(metrics.ActivityScheduleToStartLatency).Record(scheduleToStartLatency)
+		if err == nil {
+			output, err = executor.ExecuteWithActualArgs(ctx, args)
+		}
+	} else {
+		metricsHandler.Timer(metrics.ActivityScheduleToStartLatency).Record(
+			t.GetStartedTime().AsTime().Sub(t.GetCurrentAttemptScheduledTime().AsTime()),
+		)
+		output, err = activityImplementation.Execute(ctx, t.Input)
+		metricsHandler = getActivityEnv(ctx).metricsHandler
+	}
 	// Check if context canceled at a higher level before we cancel it ourselves
 
 	// The heartbeat visitor failure path proactively sent RespondActivityTaskFailed,
@@ -2534,6 +2572,14 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 	}
 
 	return response, nil
+}
+
+func (ath *activityTaskHandlerImpl) takeDexMetricsHandler(taskToken []byte) (metrics.Handler, bool) {
+	value, ok := ath.dexMetricsHandlers.LoadAndDelete(string(taskToken))
+	if !ok {
+		return nil, false
+	}
+	return value.(metrics.Handler), true
 }
 
 func (ath *activityTaskHandlerImpl) visitorErrorToActivityFailure(msgPrefix string, t *workflowservice.PollActivityTaskQueueResponse, err error) *workflowservice.RespondActivityTaskFailedRequest {

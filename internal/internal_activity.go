@@ -78,15 +78,16 @@ type (
 	// ExecuteLocalActivityParams parameters for executing a local activity
 	ExecuteLocalActivityParams struct {
 		ExecuteLocalActivityOptions
-		ActivityFn       interface{} // local activity function pointer
-		ActivityType     string      // local activity type
-		InputArgs        []interface{}
-		WorkflowInfo     *WorkflowInfo
-		DataConverter    converter.DataConverter    // context-aware DC from ExecuteLocalActivity
-		FailureConverter converter.FailureConverter // context-aware FC from ExecuteLocalActivity
-		Attempt          int32
-		ScheduledTime    time.Time
-		Header           *commonpb.Header
+		ActivityFn          interface{} // local activity function pointer
+		ActivityType        string      // local activity type
+		InputArgs           []interface{}
+		WorkflowInfo        *WorkflowInfo
+		DataConverter       converter.DataConverter    // context-aware DC from ExecuteLocalActivity
+		FailureConverter    converter.FailureConverter // context-aware FC from ExecuteLocalActivity
+		Attempt             int32
+		ScheduledTime       time.Time
+		Header              *commonpb.Header
+		DexMetricsProviders dexActivityMetricProviders
 	}
 
 	// AsyncActivityClient for requesting activity execution
@@ -136,6 +137,7 @@ type (
 		priority               *commonpb.Priority
 		retryPolicy            *RetryPolicy
 		activityRunID          string
+		dexInheritedFlowType   string
 	}
 
 	// context.WithValue need this type instead of basic type string to avoid lint error
@@ -176,6 +178,13 @@ func getActivityEnv(ctx context.Context) *activityEnvironment {
 		panic("getActivityEnv: Not an activity context")
 	}
 	return env.(*activityEnvironment)
+}
+
+func (a *activityEnvironment) setDexActivityMetrics(values dexActivityMetricValues) {
+	a.metricsHandler = dexActivityMetricsHandler(a.metricsHandler, values)
+	if invoker, ok := a.serviceInvoker.(*temporalInvoker); ok {
+		invoker.metricsHandler = a.metricsHandler
+	}
 }
 
 func getActivityOptions(ctx Context) *ExecuteActivityOptions {

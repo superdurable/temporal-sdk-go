@@ -586,6 +586,17 @@ type (
 		// when WorkerOptions does not specify [DeploymentOptions.DefaultVersioningBehavior],
 		// [DeploymentOptions.DeploymentSeriesName] is set, and [UseBuildIDForVersioning] is true.
 		VersioningBehavior VersioningBehavior
+
+		// FlowTypeProvider extracts the Dex flow type from the first non-context
+		// workflow argument after it has been decoded for the workflow function. It
+		// reuses the decoded argument and is not supported for custom workflow
+		// factories. The result is used as a metric label and should have bounded
+		// cardinality. An empty result becomes "none". If the provider panics, the
+		// workflow task fails before the workflow function is invoked.
+		//
+		// The provider must be a pure deterministic function. It may be called again
+		// during replay, cache eviction, and cache-disabled execution.
+		FlowTypeProvider func(input any) string
 	}
 
 	// LoadDynamicRuntimeOptionsDetails is used as input to the LoadDynamicRuntimeOptions callback for dynamic workflows
@@ -1072,6 +1083,7 @@ func (wc *workflowEnvironmentInterceptor) ExecuteActivity(ctx Context, typeName 
 		settable.Set(nil, err)
 		return future
 	}
+	addDexFlowTypeHeader(header, getWorkflowEnvironment(ctx))
 
 	env := getWorkflowEnvironment(ctx)
 	// Generate activity ID before serialization so it's available to context-aware data converters
@@ -1209,6 +1221,7 @@ func (wc *workflowEnvironmentInterceptor) ExecuteLocalActivity(ctx Context, type
 		settable.Set(nil, err)
 		return future
 	}
+	addDexFlowTypeHeader(header, getWorkflowEnvironment(ctx))
 
 	var activityFn interface{}
 	localCtx := ctx.Value(localActivityFnContextKey).(*localActivityContext)
@@ -1286,6 +1299,7 @@ func (wc *workflowEnvironmentInterceptor) ExecuteLocalActivity(ctx Context, type
 		ScheduledTime:               Now(ctx), // initial scheduled time
 		Header:                      header,
 		Attempt:                     1, // Attempts always start at one
+		DexMetricsProviders:         getRegistryFromWorkflowContext(ctx).getDexActivityMetricsProviders(typeName),
 	}
 
 	Go(ctx, func(ctx Context) {

@@ -95,6 +95,28 @@ type (
 		// When registering a struct with activities, skip functions that are not valid activities. If false,
 		// registration panics.
 		SkipInvalidStructFunctions bool
+
+		// The Dex metrics providers receive the first non-context activity
+		// argument after it has been decoded for the activity function. Providers
+		// reuse those decoded arguments and are not called for struct or custom
+		// executor registrations. A provider panic fails the activity task before
+		// invoking the activity function. Empty values become "none". Provider
+		// results are metric labels and should have bounded cardinality.
+		//
+		// FlowTypeProvider extracts the flow type. A non-empty value overrides the
+		// flow type inherited from the parent workflow; an empty value falls back to
+		// the inherited value, or "none" when no inherited value exists.
+		FlowTypeProvider func(input any) string
+		// StepTypeProvider identifies the activity as a step and extracts its step
+		// type. At most one of StepTypeProvider, SubFlowTypeProvider, and
+		// RPCNameProvider may be set.
+		StepTypeProvider func(input any) string
+		// SubFlowTypeProvider identifies the activity as a subflow starter and
+		// extracts its subflow type.
+		SubFlowTypeProvider func(input any) string
+		// RPCNameProvider identifies the activity as an RPC invocation and extracts
+		// its RPC name.
+		RPCNameProvider func(input any) string
 	}
 
 	// ActivityOptions stores all activity-specific parameters that will be stored inside of a context.

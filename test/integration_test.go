@@ -302,12 +302,12 @@ func (ts *IntegrationTestSuite) TestBasic() {
 
 	// Check metrics (some may be called a non-deterministic number of times
 	// based on server speed)
-	ts.assertMetricCount("temporal_request", 1, "operation", "StartWorkflowExecution")
-	ts.assertMetricCountAtLeast("temporal_request", 1, "operation", "RespondWorkflowTaskCompleted")
-	ts.assertMetricCountAtLeast("temporal_workflow_task_queue_poll_succeed", 1)
+	ts.assertMetricCount("dex_request", 1, "operation", "StartWorkflowExecution")
+	ts.assertMetricCountAtLeast("dex_request", 1, "operation", "RespondWorkflowTaskCompleted")
+	ts.assertMetricCountAtLeast("dex_sys_flow_task_queue_poll_succeed", 1)
 	// We cannot check PollActivityTaskQueue metric because eager activities
 	// affect poll count
-	ts.assertMetricCountAtLeast("temporal_long_request", 3, "operation", "PollWorkflowTaskQueue")
+	ts.assertMetricCountAtLeast("dex_long_request", 3, "operation", "PollWorkflowTaskQueue")
 }
 
 func (ts *IntegrationTestSuite) TestPreferredVersionProvider() {
@@ -705,14 +705,14 @@ func (ts *IntegrationTestSuite) TestActivityRetryOnError() {
 
 	// Check metrics (some may be called a non-deterministic number of times
 	// based on server speed)
-	ts.assertMetricCount("temporal_request", 1, "operation", "StartWorkflowExecution")
-	ts.assertMetricCountAtLeast("temporal_request", 1, "operation", "RespondWorkflowTaskCompleted")
-	ts.Equal(ts.metricCount("temporal_request"), ts.metricCount("temporal_request_attempt"))
-	ts.assertMetricCountAtLeast("temporal_activity_execution_failed", 2)
-	ts.assertMetricCountAtLeast("temporal_workflow_task_queue_poll_succeed", 1)
-	ts.assertMetricCountAtLeast("temporal_long_request", 4, "operation", "PollActivityTaskQueue")
-	ts.assertMetricCountAtLeastEventually("temporal_long_request", 3, "operation", "PollWorkflowTaskQueue")
-	ts.Equal(ts.metricCount("temporal_long_request"), ts.metricCount("temporal_long_request_attempt"))
+	ts.assertMetricCount("dex_request", 1, "operation", "StartWorkflowExecution")
+	ts.assertMetricCountAtLeast("dex_request", 1, "operation", "RespondWorkflowTaskCompleted")
+	ts.Equal(ts.metricCount("dex_request"), ts.metricCount("dex_request_attempt"))
+	ts.assertMetricCountAtLeast("dex_sync_sys_step_execution_failed", 2)
+	ts.assertMetricCountAtLeast("dex_sys_flow_task_queue_poll_succeed", 1)
+	ts.assertMetricCountAtLeast("dex_long_request", 4, "operation", "PollActivityTaskQueue")
+	ts.assertMetricCountAtLeastEventually("dex_long_request", 3, "operation", "PollWorkflowTaskQueue")
+	ts.Equal(ts.metricCount("dex_long_request"), ts.metricCount("dex_long_request_attempt"))
 }
 
 func (ts *IntegrationTestSuite) TestActivityNotRegisteredRetry() {
@@ -723,7 +723,7 @@ func (ts *IntegrationTestSuite) TestActivityNotRegisteredRetry() {
 
 	// Check metric (may be called a non-deterministic number of times based on
 	// server speed)
-	ts.assertMetricCountAtLeast("temporal_unregistered_activity_invocation", 2)
+	ts.assertMetricCountAtLeast("dex_unregistered_activity_invocation", 2)
 }
 
 func (ts *IntegrationTestSuite) TestActivityRetryOnTimeoutStableError() {
@@ -774,13 +774,13 @@ func (ts *IntegrationTestSuite) TestLongRunningActivityWithHBAndGrpcRetries() {
 	ts.NoError(err)
 	ts.EqualValues(expected, ts.activities.invoked())
 	// we induce 2 failures, but they all should be retried
-	ts.assertReportedOperationCount("temporal_request_failure", "RecordActivityTaskHeartbeat", 0)
+	ts.assertReportedOperationCount("dex_request_failure", "RecordActivityTaskHeartbeat", 0)
 	// expect 2 retry attempts
-	ts.assertReportedOperationCount("temporal_request_failure_attempt", "RecordActivityTaskHeartbeat", 2)
+	ts.assertReportedOperationCount("dex_request_failure_attempt", "RecordActivityTaskHeartbeat", 2)
 	// save number of heartbeats sent to the server
-	totalHeartbeats := ts.getReportedOperationCount("temporal_request", "RecordActivityTaskHeartbeat")
+	totalHeartbeats := ts.getReportedOperationCount("dex_request", "RecordActivityTaskHeartbeat")
 	// and make sure that number of reported attempts is 2 more, because of retries.
-	ts.assertReportedOperationCount("temporal_request_attempt", "RecordActivityTaskHeartbeat", int(totalHeartbeats+2))
+	ts.assertReportedOperationCount("dex_request_attempt", "RecordActivityTaskHeartbeat", int(totalHeartbeats+2))
 }
 
 func (ts *IntegrationTestSuite) TestHeartbeatOnActivityFailure() {
@@ -2707,9 +2707,9 @@ func (ts *IntegrationTestSuite) TestEndToEndLatencyMetrics() {
 	fetchMetrics := func() (localMetric, nonLocalMetric *metrics.CapturedTimer) {
 		for _, timer := range ts.metricsHandler.Timers() {
 			timer := timer
-			if timer.Name == "temporal_activity_succeed_endtoend_latency" {
+			if timer.Name == "dex_sync_sys_step_succeed_endtoend_latency" {
 				nonLocalMetric = timer
-			} else if timer.Name == "temporal_local_activity_succeed_endtoend_latency" {
+			} else if timer.Name == "dex_async_sys_step_succeed_endtoend_latency" {
 				localMetric = timer
 			}
 		}
@@ -2745,9 +2745,9 @@ func (ts *IntegrationTestSuite) TestEndToEndLatencyOnFailureMetrics() {
 	fetchMetrics := func() (localMetric, nonLocalMetric *metrics.CapturedTimer) {
 		for _, timer := range ts.metricsHandler.Timers() {
 			timer := timer
-			if timer.Name == "temporal_activity_succeed_endtoend_latency" {
+			if timer.Name == "dex_sync_sys_step_succeed_endtoend_latency" {
 				nonLocalMetric = timer
-			} else if timer.Name == "temporal_local_activity_succeed_endtoend_latency" {
+			} else if timer.Name == "dex_async_sys_step_succeed_endtoend_latency" {
 				localMetric = timer
 			}
 		}
@@ -5298,7 +5298,7 @@ func (ts *IntegrationTestSuite) testNonDeterminismFailureCause(historyMismatch b
 	fetchMetrics := func() (localMetric int64) {
 		for _, counter := range ts.metricsHandler.Counters() {
 			counter := counter
-			if counter.Name == "temporal_workflow_task_execution_failed" && counter.Tags["failure_reason"] == "NonDeterminismError" {
+			if counter.Name == "dex_sys_flow_task_execution_failed" && counter.Tags["failure_reason"] == "NonDeterminismError" {
 				localMetric = counter.Value()
 			}
 		}
@@ -5402,7 +5402,7 @@ func (ts *IntegrationTestSuite) TestNonDeterminismFailureCauseReplay() {
 	fetchMetrics := func() (localMetric int64) {
 		for _, counter := range ts.metricsHandler.Counters() {
 			counter := counter
-			if counter.Name == "temporal_workflow_task_execution_failed" && counter.Tags["failure_reason"] == "NonDeterminismError" {
+			if counter.Name == "dex_sys_flow_task_execution_failed" && counter.Tags["failure_reason"] == "NonDeterminismError" {
 				localMetric = counter.Value()
 			}
 		}
@@ -5764,7 +5764,7 @@ func (ts *IntegrationTestSuite) TestHeartbeatThrottleDisabled() {
 
 	// That short of time by default on non-failure would only record the first
 	// one
-	ts.assertReportedOperationCount("temporal_request_attempt", "RecordActivityTaskHeartbeat", 1)
+	ts.assertReportedOperationCount("dex_request_attempt", "RecordActivityTaskHeartbeat", 1)
 
 	// Restart worker with heartbeat throttling effectively disabled
 	ts.worker.Stop()
@@ -5782,8 +5782,8 @@ func (ts *IntegrationTestSuite) TestHeartbeatThrottleDisabled() {
 		100*time.Millisecond, 4))
 
 	// Now that heartbeat throttling was disabled, it should have sent all 4 times
-	ts.assertReportedOperationCount("temporal_request", "RecordActivityTaskHeartbeat", 4)
-	ts.assertReportedOperationCount("temporal_request_failure", "RecordActivityTaskHeartbeat", 0)
+	ts.assertReportedOperationCount("dex_request", "RecordActivityTaskHeartbeat", 4)
+	ts.assertReportedOperationCount("dex_request_failure", "RecordActivityTaskHeartbeat", 0)
 }
 
 func (ts *IntegrationTestSuite) TestUpsertMemoFromNil() {
@@ -7472,6 +7472,7 @@ func (ts *IntegrationTestSuite) startWorkflowOptions(wfID string) client.StartWo
 func (ts *IntegrationTestSuite) registerWorkflowsAndActivities(w worker.Worker) {
 	ts.workflows.register(w)
 	ts.activities.register(w)
+	registerDexMetricsWorkflowsAndActivities(w)
 	w.RegisterNexusService(temporalOpService)
 }
 
@@ -8707,19 +8708,19 @@ func (ts *IntegrationTestSuite) TestWorkflowCompletionMetrics() {
 		for _, cnt := range ts.metricsHandler.Counters() {
 			if cnt.Tags["workflow_type"] == "workflow-completion" {
 				switch cnt.Name {
-				case "temporal_workflow_completed":
+				case "dex_sys_flow_completed":
 					compCount += int(cnt.Value())
-				case "temporal_workflow_failed":
+				case "dex_sys_flow_failed":
 					failCount += int(cnt.Value())
-				case "temporal_workflow_continue_as_new":
+				case "dex_sys_flow_continue_as_new":
 					contCount += int(cnt.Value())
-				case "temporal_workflow_canceled":
+				case "dex_sys_flow_canceled":
 					cancelCount += int(cnt.Value())
 				}
 			}
 		}
 		for _, tim := range ts.metricsHandler.Timers() {
-			if tim.Tags["workflow_type"] == "workflow-completion" && tim.Name == "temporal_workflow_endtoend_latency" {
+			if tim.Tags["workflow_type"] == "workflow-completion" && tim.Name == "dex_sys_flow_endtoend_latency" {
 				latencyCount += int(tim.Count())
 			}
 		}
@@ -8779,7 +8780,7 @@ func (ts *IntegrationTestSuite) TestUnhandledCommandAndMetrics() {
 	// would have been reported multiple times.
 	var workflowCompletedCount int
 	for _, cnt := range ts.metricsHandler.Counters() {
-		if cnt.Name == "temporal_workflow_completed" && cnt.Tags["workflow_type"] == "unhandled-command" {
+		if cnt.Name == "dex_sys_flow_completed" && cnt.Tags["workflow_type"] == "unhandled-command" {
 			workflowCompletedCount += int(cnt.Value())
 		}
 	}

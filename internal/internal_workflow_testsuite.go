@@ -241,15 +241,18 @@ type (
 		updateMap             map[string]*updateResult
 		startedHandler        func(r WorkflowExecution, e error)
 
-		isWorkflowCompleted bool
-		testResult          converter.EncodedValue
-		testError           error
-		doneChannel         chan struct{}
-		doneChannelOnce     sync.Once
-		workerOptions       WorkerOptions
-		dataConverter       converter.DataConverter
-		failureConverter    converter.FailureConverter
-		runTimeout          time.Duration
+		isWorkflowCompleted   bool
+		testResult            converter.EncodedValue
+		testError             error
+		doneChannel           chan struct{}
+		doneChannelOnce       sync.Once
+		workerOptions         WorkerOptions
+		dataConverter         converter.DataConverter
+		failureConverter      converter.FailureConverter
+		dexMetricsHandler     metrics.Handler
+		dexFlowType           string
+		dexFlowTypeConfigured bool
+		runTimeout            time.Duration
 
 		heartbeatDetails *commonpb.Payloads
 
@@ -700,8 +703,14 @@ func (env *testWorkflowEnvironmentImpl) getWorkflowDefinition(wt WorkflowType) (
 		}, nil
 	}
 	wd := &workflowExecutorWrapper{
-		workflowExecutor: &workflowExecutor{workflowType: wt.Name, fn: wf, interceptors: env.registry.interceptors, dynamic: dynamic},
-		env:              env,
+		workflowExecutor: &workflowExecutor{
+			workflowType:     wt.Name,
+			fn:               wf,
+			interceptors:     env.registry.interceptors,
+			dynamic:          dynamic,
+			flowTypeProvider: env.registry.getWorkflowFlowTypeProvider(wt.Name),
+		},
+		env: env,
 	}
 	return newSyncWorkflowDefinition(wd), nil
 }
@@ -1311,7 +1320,22 @@ func (env *testWorkflowEnvironmentImpl) GetLogger() log.Logger {
 }
 
 func (env *testWorkflowEnvironmentImpl) GetMetricsHandler() metrics.Handler {
+	if env.dexMetricsHandler != nil {
+		return env.dexMetricsHandler
+	}
 	return env.metricsHandler
+}
+
+func (env *testWorkflowEnvironmentImpl) setDexWorkflowMetrics(flowType string, configured bool) {
+	env.dexFlowType = flowType
+	env.dexFlowTypeConfigured = configured
+	if configured {
+		env.dexMetricsHandler = env.metricsHandler.WithTags(metrics.DexWorkflowTags(flowType))
+	}
+}
+
+func (env *testWorkflowEnvironmentImpl) dexWorkflowFlowType() (string, bool) {
+	return env.dexFlowType, env.dexFlowTypeConfigured
 }
 
 func (env *testWorkflowEnvironmentImpl) GetDataConverter() converter.DataConverter {
@@ -1806,7 +1830,11 @@ func ensureDefaultRetryPolicy(parameters *ExecuteActivityParams) {
 
 func (env *testWorkflowEnvironmentImpl) ExecuteLocalActivity(params ExecuteLocalActivityParams, callback LocalActivityResultHandler) LocalActivityID {
 	activityID := getStringID(env.nextID())
-	ae := &activityExecutor{name: getActivityFunctionName(env.registry, params.ActivityFn), fn: params.ActivityFn}
+	ae := &activityExecutor{
+		name:                getActivityFunctionName(env.registry, params.ActivityFn),
+		fn:                  params.ActivityFn,
+		dexMetricsProviders: params.DexMetricsProviders,
+	}
 	if at, _ := getValidatedActivityFunction(params.ActivityFn, params.InputArgs, env.registry); at != nil {
 		// local activity could be registered, if so use the registered name. This name is only used to find a mock.
 		ae.name = at.Name
@@ -2400,6 +2428,9 @@ func (env *testWorkflowEnvironmentImpl) newTestActivityTaskHandler(taskQueue str
 		}
 		dynamic := activity == env.registry.dynamicActivity
 		ae := &activityExecutor{name: activity.ActivityType().Name, fn: activity.GetFunction(), dynamic: dynamic}
+		if registered, ok := activity.(*activityExecutor); ok {
+			ae.dexMetricsProviders = registered.dexMetricsProviders
+		}
 
 		if env.sessionEnvironment != nil {
 			// Special handling for session creation and completion activities.

@@ -15,6 +15,7 @@ import (
 	"go.temporal.io/sdk/internal"
 	ilog "go.temporal.io/sdk/internal/log"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 )
 
 type replayTestSuite struct {
@@ -86,6 +87,16 @@ func (s *replayTestSuite) TestReplayWorkflowHistoryFromFile() {
 		err = replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), testFile)
 		require.NoError(s.T(), err, "file: %s", testFile)
 	}
+}
+
+func (s *replayTestSuite) TestReplayLegacyActivityHeaderWithDexFlowTypeProvider() {
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflowWithOptions(Workflow1, workflow.RegisterOptions{
+		FlowTypeProvider: func(input any) string { return input.(string) },
+	})
+
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), "workflow1.json")
+	require.NoError(s.T(), err)
 }
 
 func (s *replayTestSuite) TestReplayWorkflowWithBadUnknownEvent() {

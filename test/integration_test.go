@@ -7647,6 +7647,9 @@ func (t *signalInterceptor) InterceptWorkflow(ctx workflow.Context, next interce
 }
 
 func (ts *IntegrationTestSuite) metricCount(name string, tagFilterKeyValue ...string) (total int64) {
+	if suffix, ok := strings.CutPrefix(name, metrics.TemporalMetricsPrefix); ok {
+		name = "dex_" + suffix
+	}
 	for _, counter := range ts.metricsHandler.Counters() {
 		if counter.Name != name {
 			continue
@@ -7667,6 +7670,9 @@ func (ts *IntegrationTestSuite) metricCount(name string, tagFilterKeyValue ...st
 }
 
 func (ts *IntegrationTestSuite) metricGauge(name string, tagFilterKeyValue ...string) (final float64) {
+	if suffix, ok := strings.CutPrefix(name, metrics.TemporalMetricsPrefix); ok {
+		name = "dex_" + suffix
+	}
 	for _, gauge := range ts.metricsHandler.Gauges() {
 		if gauge.Name != name {
 			continue
@@ -7939,7 +7945,7 @@ func (ts *IntegrationTestSuite) TestWorkflowTaskFailureMetric_BenignHandling() {
 	}
 
 	ts.worker.RegisterWorkflow(wfWithApplicationErr)
-	currCount := ts.metricCount(metrics.WorkflowFailedCounter)
+	currCount := ts.metricCount("dex_sys_flow_failed")
 
 	runNonBenign, err := ts.client.ExecuteWorkflow(
 		context.Background(),
@@ -7953,13 +7959,13 @@ func (ts *IntegrationTestSuite) TestWorkflowTaskFailureMetric_BenignHandling() {
 	// Expect a non-benign application error.
 	ts.Error(err)
 	var appErr *temporal.ApplicationError
-	ts.True(errors.As(err, &appErr))
+	ts.True(errors.As(err, &appErr), "unexpected workflow error: %v", err)
 	ts.False(appErr.Category() == temporal.ApplicationErrorCategoryBenign)
 	ts.Equal("Non-benign failure", appErr.Error())
 
 	// Expect initial count to have incremented because the workflow failed with non-benign err.
 	currCount++
-	ts.assertMetricCountEventually(metrics.WorkflowFailedCounter, currCount)
+	ts.assertMetricCountEventually("dex_sys_flow_failed", currCount)
 
 	runBenign, err := ts.client.ExecuteWorkflow(
 		context.Background(),
@@ -7972,10 +7978,10 @@ func (ts *IntegrationTestSuite) TestWorkflowTaskFailureMetric_BenignHandling() {
 	err = runBenign.Get(context.Background(), nil)
 	// Expect a benign application error.
 	ts.Error(err)
-	ts.True(errors.As(err, &appErr))
+	ts.True(errors.As(err, &appErr), "unexpected workflow error: %v", err)
 	ts.True(appErr.Category() == temporal.ApplicationErrorCategoryBenign)
 	// Expect count to not have incremented because the workflow failed with benign err.
-	ts.assertMetricCountEventually(metrics.WorkflowFailedCounter, currCount)
+	ts.assertMetricCountEventually("dex_sys_flow_failed", currCount)
 }
 
 func (ts *IntegrationTestSuite) TestActivityFailureMetric_BenignHandling() {
@@ -8008,7 +8014,8 @@ func (ts *IntegrationTestSuite) TestActivityFailureMetric_BenignHandling() {
 	ts.NoError(err)
 	defer c.Close()
 
-	testWorker := worker.New(c, ts.taskQueueName, worker.Options{})
+	testTaskQueue := ts.taskQueueName + "-activity-failure"
+	testWorker := worker.New(c, testTaskQueue, worker.Options{})
 	testWorker.RegisterActivity(actWithAppErr)
 	testWorker.RegisterWorkflow(wfWithAppErrActivity)
 	err = testWorker.Start()
@@ -8016,11 +8023,13 @@ func (ts *IntegrationTestSuite) TestActivityFailureMetric_BenignHandling() {
 	defer testWorker.Stop()
 
 	var appErr *temporal.ApplicationError
-	currCount := ts.metricCount(metrics.ActivityExecutionFailedCounter)
+	currCount := ts.metricCount("dex_sync_sys_step_execution_failed")
 
+	nonBenignOptions := ts.startWorkflowOptions(ts.T().Name() + "-non-benign-err")
+	nonBenignOptions.TaskQueue = testTaskQueue
 	runNonBenign, err := c.ExecuteWorkflow(
 		context.Background(),
-		ts.startWorkflowOptions(ts.T().Name()+"-non-benign-err"),
+		nonBenignOptions,
 		wfWithAppErrActivity,
 		false,
 	)
@@ -8028,7 +8037,7 @@ func (ts *IntegrationTestSuite) TestActivityFailureMetric_BenignHandling() {
 	// Wait for completion
 	err = runNonBenign.Get(context.Background(), nil)
 	ts.Error(err)
-	ts.True(errors.As(err, &appErr))
+	ts.True(errors.As(err, &appErr), "unexpected workflow error: %v", err)
 	// Expect non-benign error
 	ts.False(appErr.Category() == temporal.ApplicationErrorCategoryBenign)
 	// Expect warn log for activity failure
@@ -8038,18 +8047,20 @@ func (ts *IntegrationTestSuite) TestActivityFailureMetric_BenignHandling() {
 
 	// Expect initial count to have incremented because the activity failed with non-benign err.
 	currCount++
-	ts.assertMetricCount(metrics.ActivityExecutionFailedCounter, currCount)
+	ts.assertMetricCount("dex_sync_sys_step_execution_failed", currCount)
 
+	benignOptions := ts.startWorkflowOptions(ts.T().Name() + "-benign-err")
+	benignOptions.TaskQueue = testTaskQueue
 	runBenign, err := c.ExecuteWorkflow(
 		context.Background(),
-		ts.startWorkflowOptions(ts.T().Name()+"-benign-err"),
+		benignOptions,
 		wfWithAppErrActivity, true,
 	)
 	ts.NoError(err)
 	// Wait for completion
 	err = runBenign.Get(context.Background(), nil)
 	ts.Error(err)
-	ts.True(errors.As(err, &appErr))
+	ts.True(errors.As(err, &appErr), "unexpected workflow error: %v", err)
 	// Expect benign error
 	ts.True(appErr.Category() == temporal.ApplicationErrorCategoryBenign)
 	// Expect debug log for activity failure
@@ -8058,7 +8069,7 @@ func (ts *IntegrationTestSuite) TestActivityFailureMetric_BenignHandling() {
 	}))
 
 	// Expect count to not have incremented because the activity failed with benign err.
-	ts.assertMetricCount(metrics.ActivityExecutionFailedCounter, currCount)
+	ts.assertMetricCount("dex_sync_sys_step_execution_failed", currCount)
 }
 
 func (ts *IntegrationTestSuite) TestLocalActivityFailureMetric_BenignHandling() {
@@ -8083,7 +8094,7 @@ func (ts *IntegrationTestSuite) TestLocalActivityFailureMetric_BenignHandling() 
 	ts.worker.RegisterWorkflow(wfWithLocalActAppErr)
 
 	var appErr *temporal.ApplicationError
-	currCount := ts.metricCount(metrics.LocalActivityExecutionFailedCounter)
+	currCount := ts.metricCount("dex_async_sys_step_execution_failed")
 
 	runNonBenign, err := ts.client.ExecuteWorkflow(
 		context.Background(),
@@ -8100,7 +8111,7 @@ func (ts *IntegrationTestSuite) TestLocalActivityFailureMetric_BenignHandling() 
 
 	// Expect initial count to have incremented because the activity failed with non-benign err.
 	currCount++
-	ts.assertMetricCount(metrics.LocalActivityExecutionFailedCounter, currCount)
+	ts.assertMetricCount("dex_async_sys_step_execution_failed", currCount)
 
 	runBenign, err := ts.client.ExecuteWorkflow(
 		context.Background(),
@@ -8116,7 +8127,7 @@ func (ts *IntegrationTestSuite) TestLocalActivityFailureMetric_BenignHandling() 
 	ts.True(appErr.Category() == temporal.ApplicationErrorCategoryBenign)
 
 	// Expect count to remain unchanged
-	ts.assertMetricCount(metrics.LocalActivityExecutionFailedCounter, currCount)
+	ts.assertMetricCount("dex_async_sys_step_execution_failed", currCount)
 }
 
 func (ts *IntegrationTestSuite) registerWorkerShutdownCancelWorkflow(w worker.Worker) (

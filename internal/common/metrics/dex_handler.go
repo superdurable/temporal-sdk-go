@@ -3,6 +3,8 @@ package metrics
 import "strings"
 
 const (
+	// These reserved tags carry Dex metadata through Handler.WithTags. The private prefix avoids
+	// collisions with SDK or user tags, and dexMetricsHandler strips them before emitting metrics.
 	dexActivityKindTag = "__temporal_sdk_dex_activity_kind"
 	dexFlowTypeTag     = "__temporal_sdk_dex_flow_type"
 	dexStepTypeTag     = "__temporal_sdk_dex_step_type"

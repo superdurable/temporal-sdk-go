@@ -46,13 +46,16 @@ func TestDexActivityMetricsProviders(t *testing.T) {
 
 	values, err = providers.values("activity", &dexMetricsTestInput{}, "parent")
 	require.NoError(t, err)
-	require.Equal(t, "parent", values.flowType)
+	require.Equal(t, "none", values.flowType)
 	require.Equal(t, "none", values.stepType)
 
-	providers.flowTypeProvider = func(any) string { return "none" }
-	values, err = providers.values("activity", &dexMetricsTestInput{}, "parent")
+	inheritedProviders := dexActivityProviders(RegisterActivityOptions{
+		StepTypeProvider: func(input any) string { return input.(*dexMetricsTestInput).StepType },
+	})
+	values, err = inheritedProviders.values("activity", &dexMetricsTestInput{StepType: "step"}, "parent")
 	require.NoError(t, err)
-	require.Equal(t, "none", values.flowType)
+	require.Equal(t, "parent", values.flowType)
+	require.Equal(t, "step", values.stepType)
 }
 
 func TestDexMetricsProviderPanicReturnsError(t *testing.T) {
@@ -86,11 +89,25 @@ func TestDexFlowTypeHeader(t *testing.T) {
 	require.Empty(t, popDexFlowTypeHeader(nil))
 	require.Empty(t, popDexFlowTypeHeader(&commonpb.Header{}))
 
-	header := &commonpb.Header{Fields: map[string]*commonpb.Payload{}}
 	env := &workflowEnvironmentImpl{dexFlowType: "flow", dexFlowTypeConfigured: true}
-	addDexFlowTypeHeader(header, env)
+	header := &commonpb.Header{Fields: map[string]*commonpb.Payload{}}
+	addDexFlowTypeHeader(header, env, dexActivityMetricProviders{})
 	require.Equal(t, "flow", popDexFlowTypeHeader(header))
 	require.NotContains(t, header.Fields, dexFlowTypeHeaderName)
+
+	header = &commonpb.Header{Fields: map[string]*commonpb.Payload{}}
+	providers := dexActivityProviders(RegisterActivityOptions{
+		FlowTypeProvider: func(input any) string { return input.(*dexMetricsTestInput).FlowType },
+	})
+	addDexFlowTypeHeader(header, env, providers)
+	require.NotContains(t, header.Fields, dexFlowTypeHeaderName)
+
+	header = &commonpb.Header{Fields: map[string]*commonpb.Payload{}}
+	providers = dexActivityProviders(RegisterActivityOptions{
+		StepTypeProvider: func(input any) string { return input.(*dexMetricsTestInput).StepType },
+	})
+	addDexFlowTypeHeader(header, env, providers)
+	require.Equal(t, "flow", popDexFlowTypeHeader(header))
 }
 
 func TestDexActivityProviderUsesDecodedFirstArgumentOnce(t *testing.T) {
@@ -177,7 +194,11 @@ func TestDexWorkflowAndActivityMetricsPropagation(t *testing.T) {
 		},
 	})
 
-	input := &dexMetricsTestInput{FlowType: "OrderFlow", StepType: "ChargeCard"}
+	input := &dexMetricsTestInput{
+		FlowType:         "OrderFlow",
+		ActivityFlowType: "OrderFlow",
+		StepType:         "ChargeCard",
+	}
 	env.ExecuteWorkflow("dexMetricsWorkflow", input)
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())

@@ -26,6 +26,11 @@ to docs, or any other relevant information.
   workflow flow types to activities, adds flow/step/subflow/RPC metric tags, and rewrites Temporal
   SDK metric names into the `dex_*` namespace.
 
+### Changed
+
+- Activities with a Dex `FlowTypeProvider` no longer store the parent workflow flow type in their
+  headers. The provider is authoritative, and an empty result produces the `none` metric label.
+
 ### Breaking Changes
 
 - SDK metrics beginning with `temporal_` are now emitted under their corresponding `dex_*` names.

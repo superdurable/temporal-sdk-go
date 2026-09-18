@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -16,6 +17,7 @@ import (
 )
 
 const (
+	dexFlowTypeHeaderName        = "__temporal_sdk_dex_flow_type"
 	dexMetricsWorkflowName       = "dex-metrics-workflow"
 	dexSystemWorkflowName        = "dex-system-workflow"
 	dexSyncStepActivityName      = "dex-sync-step-activity"
@@ -146,6 +148,53 @@ func (ts *IntegrationTestSuite) TestDexMetricsProvidersAndNames() {
 	for _, timer := range ts.metricsHandler.Timers() {
 		ts.False(strings.HasPrefix(timer.Name, "temporal_"), timer.Name)
 	}
+}
+
+func (ts *IntegrationTestSuite) TestDexFlowTypeHeaderInheritance() {
+	input := &dexMetricsIntegrationInput{
+		FlowType:    "OrderFlow",
+		StepType:    "ChargeCard",
+		SubFlowType: "Fulfillment",
+		RPCName:     "ReserveInventory",
+	}
+	run, err := ts.client.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{
+		ID:        "dex-flow-type-header-" + uuid.NewString(),
+		TaskQueue: ts.taskQueueName,
+	}, dexMetricsWorkflowName, input)
+	ts.NoError(err)
+	ts.NoError(run.Get(context.Background(), nil))
+
+	expectedHeaderByActivityType := map[string]bool{
+		dexSyncStepActivityName: false,
+		dexSubFlowActivityName:  true,
+		dexRPCActivityName:      false,
+		dexSystemActivityName:   true,
+	}
+	observedHeaderByActivityType := make(map[string]bool, len(expectedHeaderByActivityType))
+	history := ts.client.GetWorkflowHistory(
+		context.Background(),
+		run.GetID(),
+		run.GetRunID(),
+		false,
+		enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT,
+	)
+	for history.HasNext() {
+		event, historyErr := history.Next()
+		ts.NoError(historyErr)
+		attributes := event.GetActivityTaskScheduledEventAttributes()
+		if attributes == nil {
+			continue
+		}
+		activityType := attributes.GetActivityType().GetName()
+		expectedHeader, tracked := expectedHeaderByActivityType[activityType]
+		if !tracked {
+			continue
+		}
+		_, hasHeader := attributes.GetHeader().GetFields()[dexFlowTypeHeaderName]
+		ts.Equal(expectedHeader, hasHeader, activityType)
+		observedHeaderByActivityType[activityType] = hasHeader
+	}
+	ts.Equal(expectedHeaderByActivityType, observedHeaderByActivityType)
 }
 
 func (ts *IntegrationTestSuite) TestDexMetricsProviderPanicsSkipBusinessFunctions() {

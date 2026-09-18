@@ -103,9 +103,8 @@ type (
 		// invoking the activity function. Empty values become "none". Provider
 		// results are metric labels and should have bounded cardinality.
 		//
-		// FlowTypeProvider extracts the flow type. A non-empty value overrides the
-		// flow type inherited from the parent workflow; an empty value falls back to
-		// the inherited value, or "none" when no inherited value exists.
+		// FlowTypeProvider extracts the flow type instead of inheriting it from the
+		// parent workflow. An empty value becomes "none".
 		FlowTypeProvider func(input any) string
 		// StepTypeProvider identifies the activity as a step and extracts its step
 		// type. At most one of StepTypeProvider, SubFlowTypeProvider, and

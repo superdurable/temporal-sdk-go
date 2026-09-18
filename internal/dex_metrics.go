@@ -117,18 +117,16 @@ func (p dexActivityMetricProviders) values(typeName string, input any, inherited
 		rpcName:     metrics.NoneTagValue,
 		kind:        p.metricKind(),
 	}
-	if inheritedFlowType != "" {
+	if p.flowTypeProvider == nil && inheritedFlowType != "" {
 		values.flowType = inheritedFlowType
 	}
 	var err error
 	if p.flowTypeProvider != nil {
-		flowType, providerErr := invokeDexMetricsProviderRaw("activity", typeName, "FlowTypeProvider", p.flowTypeProvider, input)
+		flowType, providerErr := invokeDexMetricsProvider("activity", typeName, "FlowTypeProvider", p.flowTypeProvider, input)
 		if providerErr != nil {
 			return values, providerErr
 		}
-		if flowType != "" {
-			values.flowType = flowType
-		}
+		values.flowType = flowType
 	}
 	switch p.kind {
 	case dexActivityMetricKindStep:
@@ -155,7 +153,14 @@ type dexWorkflowMetricsEnvironment interface {
 	dexWorkflowFlowType() (string, bool)
 }
 
-func addDexFlowTypeHeader(header *commonpb.Header, env WorkflowEnvironment) {
+func addDexFlowTypeHeader(
+	header *commonpb.Header,
+	env WorkflowEnvironment,
+	activityProviders dexActivityMetricProviders,
+) {
+	if activityProviders.flowTypeProvider != nil {
+		return
+	}
 	dexEnv, ok := env.(dexWorkflowMetricsEnvironment)
 	if !ok {
 		return

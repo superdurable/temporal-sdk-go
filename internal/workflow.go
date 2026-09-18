@@ -1083,7 +1083,8 @@ func (wc *workflowEnvironmentInterceptor) ExecuteActivity(ctx Context, typeName 
 		settable.Set(nil, err)
 		return future
 	}
-	addDexFlowTypeHeader(header, getWorkflowEnvironment(ctx))
+	activityProviders := registry.getDexActivityMetricsProviders(typeName)
+	addDexFlowTypeHeader(header, getWorkflowEnvironment(ctx), activityProviders)
 
 	env := getWorkflowEnvironment(ctx)
 	// Generate activity ID before serialization so it's available to context-aware data converters
@@ -1214,6 +1215,7 @@ func ExecuteLocalActivity(ctx Context, activity interface{}, args ...interface{}
 
 func (wc *workflowEnvironmentInterceptor) ExecuteLocalActivity(ctx Context, typeName string, args ...interface{}) Future {
 	future, settable := newDecodeFuture(ctx, typeName)
+	activityProviders := getRegistryFromWorkflowContext(ctx).getDexActivityMetricsProviders(typeName)
 
 	envOptions := getWorkflowEnvOptions(ctx)
 	header, err := workflowHeaderPropagated(ctx, envOptions.ContextPropagators)
@@ -1221,7 +1223,7 @@ func (wc *workflowEnvironmentInterceptor) ExecuteLocalActivity(ctx Context, type
 		settable.Set(nil, err)
 		return future
 	}
-	addDexFlowTypeHeader(header, getWorkflowEnvironment(ctx))
+	addDexFlowTypeHeader(header, getWorkflowEnvironment(ctx), activityProviders)
 
 	var activityFn interface{}
 	localCtx := ctx.Value(localActivityFnContextKey).(*localActivityContext)
@@ -1299,7 +1301,7 @@ func (wc *workflowEnvironmentInterceptor) ExecuteLocalActivity(ctx Context, type
 		ScheduledTime:               Now(ctx), // initial scheduled time
 		Header:                      header,
 		Attempt:                     1, // Attempts always start at one
-		DexMetricsProviders:         getRegistryFromWorkflowContext(ctx).getDexActivityMetricsProviders(typeName),
+		DexMetricsProviders:         activityProviders,
 	}
 
 	Go(ctx, func(ctx Context) {
